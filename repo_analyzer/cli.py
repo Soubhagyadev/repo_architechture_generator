@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
+import shutil
+import webbrowser
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +26,7 @@ from repo_analyzer.features import qa as qa_feature
 from repo_analyzer.features.architecture_feature import architecture_payload, llm_architecture
 from repo_analyzer.features.contributor import investigate
 from repo_analyzer.features.documentation import documentation_payload, llm_documentation
+from repo_analyzer.ingest import filters
 from repo_analyzer.index.store import CacheStore
 from repo_analyzer.llm.service import LLMService
 from repo_analyzer.report.html import esc, html_table, mermaid_diagram, render_html_report, section
@@ -99,8 +104,86 @@ def _console_overview(result) -> None:
     table.add_row("total LOC", str(result.total_loc))
     table.add_row("primary language", result.primary_language())
     table.add_row("frameworks", ", ".join(result.frameworks) or "-")
+    if getattr(result, "stars", 0) or getattr(result, "forks", 0):
+        pushed = f" · pushed {result.pushed_at[:10]}" if getattr(result, "pushed_at", "") else ""
+        table.add_row("GitHub stats", f"★ {result.stars} · forks {result.forks} · issues {result.open_issues}{pushed}")
     table.add_row("entry points", ", ".join(entry.path for entry in result.entry_points[:4]) or "-")
     table.add_row("parse errors", str(result.parse_errors))
+    console.print(table)
+
+
+def _console_top_files(result, limit: int = 10) -> None:
+    """Print the largest source files by LOC."""
+    ranked = sorted(result.file_stats.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    if not ranked:
+        return
+    table = Table(title=f"Largest source files (top {min(limit, len(ranked))})")
+    table.add_column("file", overflow="fold")
+    table.add_column("LOC", justify="right")
+    table.add_column("component")
+    for path, loc in ranked:
+        component = next((c.name for c in result.components if path in c.files), "-")
+        table.add_row(path, str(loc), component)
+    console.print(table)
+
+
+def _version_text() -> str:
+    """Package version for `version` command."""
+    try:
+        return importlib_metadata.version("repo-analyzer")
+    except importlib_metadata.PackageNotFoundError:
+        return "0.1.0 (source)"
+
+
+@app.command()
+def version() -> None:
+    """Print the installed repo-analyzer version."""
+    console.print(f"repo-analyzer {_version_text()}")
+
+
+@app.command()
+def clean(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+    reports: bool = typer.Option(True, "--reports/--no-reports", help="Also delete generated reports (default reports/)"),
+) -> None:
+    """Delete the analysis cache (and optionally generated reports)."""
+    config = load_config()
+    targets = [Path(config.cache.root)]
+    if reports and Path("reports").is_dir():
+        targets.append(Path("reports"))
+    removed = []
+    for path in targets:
+        if not path.exists():
+            continue
+        if not yes:
+            typer.confirm(f"delete {path}/ ?", abort=True)
+        shutil.rmtree(path)
+        removed.append(str(path))
+    console.print(f"[green]removed:[/green] {', '.join(removed) or 'nothing to remove'}")
+
+
+@app.command("config")
+def config_cmd() -> None:
+    """Print the resolved configuration with any API keys masked."""
+    _load_env()
+    config = load_config()
+    table = Table(title="Resolved configuration")
+    table.add_column("section")
+    table.add_column("value", overflow="fold")
+    table.add_row("version", _version_text())
+    table.add_row("default provider", config.default_provider)
+    for provider in config.providers:
+        key = os.environ.get(provider.env_key)
+        masked = (key[:5] + "…" + key[-3:]) if key else "[red]not set[/red]"
+        table.add_row(
+            f"provider: {provider.name}",
+            f"kind={provider.kind} model={provider.model} key={masked}",
+        )
+    table.add_row("temperature", str(config.provider_defaults.temperature))
+    table.add_row("max output tokens", str(config.provider_defaults.max_output_tokens))
+    table.add_row("context pack budget (chars)", str(config.limits.pack_char_budget))
+    table.add_row("cache root", config.cache.root)
+    table.add_row("github api", config.github.api_base)
     console.print(table)
 
 
@@ -113,6 +196,9 @@ def analyze(
     config_path: Optional[str] = typer.Option(None, "--config", help="TOML config path"),
     provider: Optional[str] = typer.Option(None, "--provider", help="LLM provider override"),
     no_llm: bool = typer.Option(False, "--no-llm", help="Disable LLM enrichment"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress console tables"),
+    open_report: bool = typer.Option(False, "--open", help="Open the HTML report in your browser"),
+    csv_out: Optional[str] = typer.Option(None, "--csv", help="Export the file inventory (path,language,loc,kb) as CSV"),
 ) -> None:
     """Full analysis overview with an HTML report containing all sections."""
     _load_env()
@@ -124,7 +210,9 @@ def analyze(
         _maybe_llm(config, llm)
     with CacheStore(config.cache.root + "/cache.sqlite3") as store:
         analyzer, result = _analyze_target(target, local, refresh, config, store)
-        _console_overview(result)
+        if not quiet:
+            _console_overview(result)
+            _console_top_files(result)
         overview_payload = overview_feature.deterministic_overview(result)
         overview_narrative = overview_feature.llm_overview(result, llm, overview_payload)
         architecture_narrative = llm_architecture(result, llm)
@@ -135,8 +223,28 @@ def analyze(
         out_dir.mkdir(parents=True, exist_ok=True)
         html_path = out_dir / f"{base}.html"
         html_path.write_text(report, encoding="utf-8")
-        console.print(f"[green]report written:[/green] {html_path}")
-        console.print(f"[dim]{_CAVEAT}[/dim]")
+        if not quiet:
+            console.print(f"[green]report written:[/green] {html_path}")
+            console.print(f"[dim]{_CAVEAT}[/dim]")
+        else:
+            console.print(html_path)
+        if csv_out:
+            csv_path = Path(csv_out)
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["path", "language", "loc", "size_kb"])
+                for path in result.all_paths:
+                    loc = result.file_stats.get(path, "")
+                    writer.writerow(
+                        [path, filters.language_for_path(path), loc, round(result.file_sizes.get(path, 0) / 1024, 1)]
+                    )
+            console.print(f"[green]csv written:[/green] {csv_path}")
+        if open_report:
+            try:
+                webbrowser.open(html_path.resolve().as_uri())
+            except Exception:
+                console.print("[yellow]could not open a browser; report is at the path above[/yellow]")
         analyzer.close()
 
 

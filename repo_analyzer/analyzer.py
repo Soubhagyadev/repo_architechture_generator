@@ -77,6 +77,11 @@ class AnalyzedRepository:
     docs_paths: list[str] = field(default_factory=list)
     parse_errors: int = 0
     source: str = "local"
+    stars: int = 0
+    forks: int = 0
+    open_issues: int = 0
+    github_language: str = ""
+    pushed_at: str = ""
 
     @property
     def is_github(self) -> bool:
@@ -218,6 +223,11 @@ class RepoAnalyzer:
             description=metadata.description,
             source="github",
         )
+        result.stars = metadata.stars
+        result.forks = metadata.forks
+        result.open_issues = metadata.open_issues
+        result.github_language = metadata.language
+        result.pushed_at = metadata.pushed_at
         self.store.put_analysis(cache_key, self._snapshot(result))
         return result
 
@@ -229,6 +239,11 @@ class RepoAnalyzer:
             "commit_sha": result.commit_sha,
             "description": result.description,
             "source": result.source,
+            "stars": result.stars,
+            "forks": result.forks,
+            "open_issues": result.open_issues,
+            "github_language": result.github_language,
+            "pushed_at": result.pushed_at,
             "workspace": str(result.workspace),
             "file_stats": result.file_stats,
             "all_paths": result.all_paths,
@@ -262,6 +277,11 @@ class RepoAnalyzer:
             description=str(snapshot.get("description") or ""),
             source=str(snapshot.get("source") or "github"),
         )
+        result.stars = int(snapshot.get("stars") or 0)
+        result.forks = int(snapshot.get("forks") or 0)
+        result.open_issues = int(snapshot.get("open_issues") or 0)
+        result.github_language = str(snapshot.get("github_language") or "")
+        result.pushed_at = str(snapshot.get("pushed_at") or "")
         return result
 
     def _index_workspace(

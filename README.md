@@ -32,10 +32,18 @@ $ repo-analyzer analyze https://github.com/pallets/flask
 | `docs` | Directory responsibilities, tech choices, execution walk-through |
 | `ask` | Grounded Q&A — answers cite exact files & lines |
 | `bug` | Bug-investigation assistant: suspect files, blast radius, suggested tests |
+| `config` | Show resolved config with API keys masked |
+| `clean` | Delete the analysis cache (and optionally reports) |
+| `version` | Installed version |
+
+**Handy `analyze` flags:** `--quiet` (scripting — prints just the report path),
+`--out reports` writes `<name>.html`, `--csv inventory.csv`,
+`--refresh`, `--no-llm`, `--open` (open the report in your browser).
+The HTML report stars/forks/issues/language from GitHub metadata in its header.
 
 **The HTML report anatomy** (sections, all cross-linked):
 
-1. **Repository snapshot** — ref, commit, LOC, frameworks
+1. **Repository snapshot** — ref, commit, LOC, frameworks, GitHub stars/forks/issues/language
 2. **Overview** — evidence-backed tech stack, key files, gotchas
 3. **Dependencies & Packaging** — manifests, configs, CI files, primary flow
 4. **Architecture** — mermaid component/dependency/cycle diagrams + LLM narrative
@@ -109,6 +117,12 @@ repo-analyzer docs <target> [--local] [--out reports]   # responsibilities + tec
 repo-analyzer ask <target> "How does flash messages flow?"     # grounded, cited answer
 repo-analyzer bug <target> "<error message/symptom>" --json    # + table-form suspects/impact
 repo-analyzer bug <target> "…" --no-llm      # graph-based: suspects, impact, test ranking
+
+# Utilities
+repo-analyzer config               # resolved providers/models (keys masked)
+repo-analyzer clean [--yes]        # wipe cache (+reports); --no-reports to keep reports
+repo-analyzer version
+repo-analyzer analyze <target> --quiet --csv inventory.csv --open
 ```
 
 Targets: full GitHub URL, `owner/repo`, or a local directory path with `--local`.

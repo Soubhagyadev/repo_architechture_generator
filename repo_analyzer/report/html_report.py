@@ -165,6 +165,17 @@ def _meta_table(result: AnalyzedRepository) -> str:
         ("frameworks", esc(", ".join(result.frameworks)) or "—"),
         ("parse errors", str(result.parse_errors)),
     ]
+    if result.is_github:
+        if result.stars or result.forks or result.open_issues:
+            pushed = f" · pushed {esc(result.pushed_at[:10])}" if result.pushed_at else ""
+            rows.append(
+                (
+                    "GitHub stats",
+                    f"★ {result.stars} · forks {result.forks} · issues {result.open_issues}{pushed}",
+                )
+            )
+        if result.github_language:
+            rows.append(("GitHub language", esc(result.github_language)))
     table = _table(["field", "value"], rows)
     body = table + (f"<p>{esc(result.description)}</p>" if result.description else "")
     return section("Repository snapshot", body)

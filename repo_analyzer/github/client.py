@@ -32,6 +32,8 @@ class RepoMetadata:
     size_kb: int = 0
     pushed_at: str = ""
     archived: bool = False
+    forks: int = 0
+    open_issues: int = 0
 
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> "RepoMetadata":
@@ -45,6 +47,8 @@ class RepoMetadata:
             size_kb=int(payload.get("size") or 0),
             pushed_at=str(payload.get("pushed_at") or ""),
             archived=bool(payload.get("archived") or False),
+            forks=int(payload.get("forks_count") or 0),
+            open_issues=int(payload.get("open_issues_count") or 0),
         )
 
 
