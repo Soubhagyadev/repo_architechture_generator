@@ -62,6 +62,14 @@ class TreeEntry:
     sha: str
 
 
+def _clean_ref(value: str) -> str:
+    """URL-safe ref for compare paths (blocks traversal and separators)."""
+    cleaned = value.strip().strip("/")
+    if ".." in cleaned or cleaned.endswith(".lock"):
+        raise GitHubError(f"unsafe ref: {value!r}")
+    return cleaned
+
+
 class GitHubClient:
     """Synchronous GitHub client with token auth, backoff, and rate-limit waits."""
 
@@ -161,6 +169,54 @@ class GitHubClient:
         if not isinstance(payload, dict):
             raise GitHubError("unexpected metadata payload")
         return RepoMetadata.from_api(payload)
+
+    def compare(
+        self,
+        slug: RepoSlug,
+        base: str,
+        head: str,
+        *,
+        max_files: int = 60,
+        max_patch_chars: int = 1600,
+    ) -> dict[str, Any]:
+        """Fetch a commit-range diff (``base...head``) with per-file patches.
+
+        Returns a trimmed payload: ``commits`` messages plus per-file change
+        summaries with patch text capped at ``max_patch_chars``.
+        """
+        url = (
+            f"{self.config.api_base}/repos/{slug.owner}/{slug.repo}/compare/"
+            f"{_clean_ref(base)}...{_clean_ref(head)}"
+        )
+        payload = self._get_json(url)
+        if not isinstance(payload, dict):
+            raise GitHubError("unexpected compare payload")
+        commits: list[dict[str, str]] = []
+        for commit in (payload.get("commits") or [])[:80]:
+            message = str(
+                (commit.get("commit") or {}).get("message") or ""
+            ).splitlines()[0]
+            if message:
+                commits.append({"sha": str(commit.get("sha", ""))[:10], "message": message})
+        files: list[dict[str, Any]] = []
+        for entry in (payload.get("files") or []):
+            files.append(
+                {
+                    "filename": str(entry.get("filename") or ""),
+                    "status": str(entry.get("status") or ""),
+                    "additions": int(entry.get("additions") or 0),
+                    "deletions": int(entry.get("deletions") or 0),
+                    "patch": str(entry.get("patch") or "")[:max_patch_chars],
+                }
+            )
+            if len(files) >= max_files:
+                break
+        return {
+            "status": payload.get("status"),
+            "total_commits": payload.get("total_commits"),
+            "commits": commits,
+            "files": files,
+        }
 
     def tree(self, slug: RepoSlug, sha: str) -> list[TreeEntry]:
         """Fetch the recursive tree for ``sha`` (handles truncation gracefully)."""

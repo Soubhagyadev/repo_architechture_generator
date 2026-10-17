@@ -120,11 +120,16 @@ def _llm_flow(result: AnalyzedRepository, flow: DataFlow) -> str:
     return f"<h3>{esc(flow.name)}</h3><p><b>trigger:</b> {trigger}</p>{body}"
 
 
-def _chart_blocks(result: AnalyzedRepository, diagrams: list[dict[str, Any]]) -> str:
-    """All deterministic mermaid diagrams with captions."""
+def _chart_blocks(result: AnalyzedRepository, diagrams: list[dict[str, Any]], notes: dict[str, str] | None = None) -> str:
+    """All deterministic mermaid diagrams with captions and optional notes."""
+    notes = notes or {}
     parts = []
     for diagram in diagrams:
-        parts.append(f"<h3>{esc(diagram.get('title') or '')}</h3>{mermaid_diagram(diagram.get('mermaid') or '')}")
+        title = diagram.get("title") or ""
+        block = f"<h3>{esc(title)}</h3>{mermaid_diagram(diagram.get('mermaid') or '')}"
+        if title in notes:
+            block += f"<p class='flow-note'>{esc(notes[title])}</p>"
+        parts.append(block)
     return "".join(parts)
 
 
@@ -263,8 +268,9 @@ def _architecture_section(
     payload: dict[str, Any],
     architecture: ArchitectureOut | None,
     llm_enabled: bool = False,
+    diagram_notes: dict[str, str] | None = None,
 ) -> str:
-    body = _chart_blocks(result, payload.get("diagrams") or [])
+    body = _chart_blocks(result, payload.get("diagrams") or [], diagram_notes)
     if architecture:
         body += f"<h3>{esc('architectural summary')}</h3>{_paragraphs(architecture.summary)}"
         if architecture.design_notes:
@@ -494,6 +500,7 @@ def build_full_report(
     architecture: ArchitectureOut | None,
     docs: DocsOut | None,
     llm_enabled: bool = False,
+    diagram_notes: dict[str, str] | None = None,
 ) -> str:
     """Assemble the single-artifact HTML report with every analysis layer."""
     payload = deterministic_overview(result)
@@ -503,7 +510,7 @@ def build_full_report(
         _meta_table(result),
         _overview_section(result, payload, overview, llm_enabled),
         _deps_section(result, payload, docs_payload),
-        _architecture_section(result, arch_payload, architecture, llm_enabled),
+        _architecture_section(result, arch_payload, architecture, llm_enabled, diagram_notes),
         _flows_section(result, arch_payload, architecture, llm_enabled),
         _relationships_section(result),
         _components_section(result),

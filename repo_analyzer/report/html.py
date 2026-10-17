@@ -37,6 +37,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .pill {{ display:inline-block; background:#eef2ff; color:#3730a3; border-radius:999px;
           padding:2px 10px; font-size:12px; margin:0 6px 6px 0; }}
   .muted {{ color:var(--muted); font-size:13px; }}
+  .flow-note {{ margin:6px 0 14px; font-size:13.5px; color:#374151; background:#f1f5f9; border-left:3px solid var(--accent); padding:8px 12px; border-radius:6px; }}
   .warn {{ border-left:4px solid #f59e0b; background:#fffbeb; padding:10px 16px; border-radius:8px; }}
   dt {{ font-weight:600; margin-top:8px; }}
   dd {{ margin:2px 0 8px; }}

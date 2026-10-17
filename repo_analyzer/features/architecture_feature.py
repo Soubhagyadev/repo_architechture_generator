@@ -143,4 +143,53 @@ def llm_architecture(result: AnalyzedRepository, llm: LLMService | None) -> Arch
     return out
 
 
-__all__ = ["architecture_payload", "llm_architecture"]
+def llm_diagram_notes(result: AnalyzedRepository, llm: LLMService | None) -> dict[str, str]:
+    """One-paragraph narrative per deterministic mermaid diagram title."""
+    if llm is None:
+        return {}
+    diagrams = diagrams_for(result)
+    if not diagrams:
+        return {}
+    from repo_analyzer.features.context import build_pack
+
+    ctx = build_pack(
+        result,
+        [entry.path for entry in result.entry_points[:4]],
+        budget=9_000,
+        whole_files=[entry.path for entry in result.entry_points[:1]],
+    ) if result.entry_points else build_pack(result, [path for path, _ in result.graph.top_central(limit=6)], budget=9_000)
+    from repo_analyzer.features.context import sanitize_for_prompt
+
+    evidence = (
+        f"Repository: {result.full_name}\n"
+        f"Components: {json.dumps([component.name for component in result.components])}\n"
+        f"Entry points: {json.dumps([entry.path for entry in result.entry_points])}\n\n"
+        "Context excerpts (line numbers exact):\n"
+        + sanitize_for_prompt(ctx.render())
+        + "\n\nDiagram titles to explain:\n"
+        + "\n".join(f"- {diagram.title}" for diagram in diagrams)
+    )
+    from repo_analyzer.llm.schemas import DiagramNotesOut
+
+    try:
+        out, _provider = llm.generate(DiagramNotesOut, _DIAGRAM_SYSTEM, evidence, max_output_tokens=1400)
+    except Exception:
+        return {}
+    known = set(result.all_paths)
+    notes: dict[str, str] = {}
+    for note in out.notes:
+        if note.title not in {diagram.title for diagram in diagrams}:
+            continue
+        note.citations = [cit for cit in note.citations if cit.file in known]
+        notes[note.title] = note.explanation
+    return notes
+
+
+_DIAGRAM_SYSTEM = """You explain architecture diagrams generated from real graph data.
+Rules:
+- One `note` per given diagram title, <= 4 sentences, grounded in the supplied context; reference concrete files (with `file`/`line` when confident).
+- Output only JSON matching: {"notes": [{"title": str, "explanation": str, "citations": [{"file": str, "line": int, "note": str}]}]}
+"""
+
+
+__all__ = ["architecture_payload", "llm_architecture", "llm_diagram_notes"]

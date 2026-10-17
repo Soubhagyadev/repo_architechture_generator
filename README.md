@@ -32,6 +32,13 @@ $ repo-analyzer analyze https://github.com/pallets/flask
 | `docs` | Directory responsibilities, tech choices, execution walk-through |
 | `ask` | Grounded Q&A — answers cite exact files & lines |
 | `bug` | Bug-investigation assistant: suspect files, blast radius, suggested tests |
+| `chat` | Interactive multi-turn Q&A session over a repo |
+| `debt` | Tech-debt report — TODO/FIXME/HACK markers clustered into themes |
+| `deps-review` | Dependency review — declared vs actually-imported packages |
+| `refactor` | Refactor plan from hotspots (god files, big symbols, fan-out, cycles) |
+| `security` | Security sweep — dangerous patterns with severity & fixes |
+| `api` | Public-API reference — symbols grouped by module with descriptions |
+| `review` | Code review of a commit range via the GitHub compare API |
 | `config` | Show resolved config with API keys masked |
 | `clean` | Delete the analysis cache (and optionally reports) |
 | `version` | Installed version |
@@ -117,6 +124,15 @@ repo-analyzer docs <target> [--local] [--out reports]   # responsibilities + tec
 repo-analyzer ask <target> "How does flash messages flow?"     # grounded, cited answer
 repo-analyzer bug <target> "<error message/symptom>" --json    # + table-form suspects/impact
 repo-analyzer bug <target> "…" --no-llm      # graph-based: suspects, impact, test ranking
+repo-analyzer chat <target>                  # interactive multi-turn Q&A
+
+# Focused LLM reports (each: --out reports [--json] for raw data)
+repo-analyzer debt <target>            # TODO/FIXME/HACK markers → themes + recommendations
+repo-analyzer deps-review <target>     # declared vs imported dependencies, risk notes
+repo-analyzer refactor <target>        # god files, big symbols, fan-out, cycles → plan
+repo-analyzer security <target>        # dangerous patterns w/ severity, why, fix
+repo-analyzer api <target>             # public symbols per module with descriptions
+repo-analyzer review <owner/repo> <base> --head <ref>   # review a commit range (GitHub compare)
 
 # Utilities
 repo-analyzer config               # resolved providers/models (keys masked)
@@ -160,8 +176,9 @@ fully offline; `--refresh` forces re-analysis.
 - The **static pipeline** (graph, components, cycles, inventory) is zero-cost
   and runs even with no API keys at all (`--no-llm`).
 - LLM enrichment: one call per narrative feature (overview, architecture,
-  docs/engineering decisions, QA, bug triage) with a ~26k-char context pack,
-  JSON-mode schema validation, and auto-retry/fallback chains.
+  docs/engineering decisions, QA, bug triage, diagram notes, plus the focused
+  reports: debt/deps-review/refactor/security/api/review) with a ~26k-char
+  context pack, JSON-mode schema validation, and auto-retry/fallback chains.
 - Default Groq free tier (~30 req/min, ~200K tokens/day per model) is far more
   than a normal analyze run needs.
 
@@ -179,7 +196,7 @@ fully offline; `--refresh` forces re-analysis.
 ```text
 repo_analyzer/
 ├── analyzer.py             # orchestrates: ingest → parse → graph → cache snapshots
-├── cli.py                  # typer entrypoint for the five commands
+├── cli.py                  # typer entrypoint for all commands
 ├── config.py               # AppConfig + provider auto-injection + fallback chain
 ├── github/                 # client (httpx), URL parsing, API models
 ├── ingest/                 # tarball extraction, filters, secret scrubbing
@@ -187,7 +204,8 @@ repo_analyzer/
 ├── analysis/               # module graph, cycles, entry points, components, layers, diagrams
 ├── index/                  # SQLite cache store (blob-hash keyed)
 ├── llm/                    # provider clients, retry/fallback service, pydantic schemas
-├── features/               # overview, architecture, documentation, qa, contributor, context
+├── features/               # overview, architecture, documentation, qa, contributor, context,
+│                           #   techdebt, security, deps_review, refactor, chat, api_reference, review_diff
 └── report/                 # single-artifact HTML report builders
 tests/                      # 121 offline tests incl. small fixture repo
 ARCHITECTURE.md             # deep-dive module docs + invariants for contributors

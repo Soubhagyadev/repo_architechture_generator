@@ -8,9 +8,10 @@ import logging
 import os
 import shutil
 import webbrowser
+from contextlib import contextmanager
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import typer
 from rich.console import Console
@@ -23,10 +24,11 @@ from repo_analyzer.config import load_config
 from repo_analyzer.errors import AnalyzerError
 from repo_analyzer.features import overview as overview_feature
 from repo_analyzer.features import qa as qa_feature
-from repo_analyzer.features.architecture_feature import architecture_payload, llm_architecture
+from repo_analyzer.features import api_reference, chat, deps_review, refactor, review_diff, security, techdebt
+from repo_analyzer.features.architecture_feature import architecture_payload, llm_architecture, llm_diagram_notes
 from repo_analyzer.features.contributor import investigate
 from repo_analyzer.features.documentation import documentation_payload, llm_documentation
-from repo_analyzer.ingest import filters
+from repo_analyzer.github.urls import parse_target
 from repo_analyzer.index.store import CacheStore
 from repo_analyzer.llm.service import LLMService
 from repo_analyzer.report.html import esc, html_table, mermaid_diagram, render_html_report, section
@@ -79,10 +81,60 @@ def _analyze_target(
     return analyzer, result
 
 
-def _maybe_llm(config, llm: LLMService | None) -> None:
-    """Warn once when no provider is configured."""
-    if llm is None:
+def _maybe_llm(config, llm: LLMService | None, *, explicit_off: bool = False) -> None:
+    """Warn once when no provider is configured (skip when --no-llm was explicit)."""
+    if llm is None and not explicit_off:
         console.print(_NO_LLM_WARNING)
+
+
+class _FeatureContext:
+    """Lifecycle bundle for the standalone feature commands."""
+
+    def __init__(self, config, llm, analyzer, result) -> None:
+        self.config = config
+        self.llm = llm
+        self.analyzer = analyzer
+        self.result = result
+
+    def close(self) -> None:
+        self.analyzer.close()
+
+
+@contextmanager
+def _feature_ctx(
+    target: str,
+    local: bool,
+    refresh: bool,
+    no_llm: bool,
+    config_path: Optional[str] = None,
+) -> "Iterator[_FeatureContext]":
+    """Analyze the target once and hand the pieces to a feature command."""
+    _load_env()
+    config = load_config(config_path)
+    llm = None if no_llm else _build_llm(config)
+    _maybe_llm(config, llm, explicit_off=no_llm)
+    with CacheStore(config.cache.root + "/cache.sqlite3") as store:
+        analyzer, result = _analyze_target(target, local, refresh, config, store)
+        ctx = _FeatureContext(config, llm, analyzer, result)
+        try:
+            yield ctx
+        finally:
+            ctx.close()
+
+
+def _feature_out(ctx: _FeatureContext, title: str, sections_html: list[str], payload: dict, out_dir: Path, name: str, quiet: bool) -> Path:
+    """Write a standalone HTML file for a feature and print the path."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{name}.html"
+    subtitle = f"{ctx.result.full_name} @ {ctx.result.ref} · {len(payload.get('changed_files', [])) or ctx.result.file_count} files"
+    path.write_text(render_html_report(title, subtitle, sections_html), encoding="utf-8")
+    if not quiet:
+        console.print(f"[green]saved[/green] {path}")
+    return path
+
+
+def _print_json(payload: dict) -> None:
+    console.print_json(json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def _save_report(out_dir: Path, base: str, title: str, subtitle: str, sections_html: list[str]) -> Path:
@@ -217,7 +269,15 @@ def analyze(
         overview_narrative = overview_feature.llm_overview(result, llm, overview_payload)
         architecture_narrative = llm_architecture(result, llm)
         docs_narrative = llm_documentation(result, llm)
-        report = build_full_report(result, overview_narrative, architecture_narrative, docs_narrative, llm_enabled=llm is not None)
+        diagram_notes = llm_diagram_notes(result, llm) if llm else {}
+        report = build_full_report(
+            result,
+            overview_narrative,
+            architecture_narrative,
+            docs_narrative,
+            llm_enabled=llm is not None,
+            diagram_notes=diagram_notes,
+        )
         base = result.full_name.replace("/", "__").replace(" ", "_").lower() or "report"
         out_dir = Path(out) if out else Path("reports")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -356,6 +416,333 @@ def docs(
             path.write_text(render_html_report(f"Documentation for {result.full_name}", result.ref, sections_html), encoding="utf-8")
             console.print(f"[green]saved[/green] {path}")
         analyzer.close()
+
+
+# ------------------------------------------------------------- feature commands
+
+@app.command("chat")
+def chat_cmd(
+    target: str = typer.Argument(..., help="GitHub URL, owner/repo, or local path with --local"),
+    local: bool = typer.Option(False, "--local"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+) -> None:
+    """Interactive multi-turn grounded Q&A session."""
+    with _feature_ctx(target, local, refresh, no_llm) as ctx:
+        chat.run_chat(ctx.result, ctx.config, ctx.llm)
+
+
+@app.command("debt")
+def debt(
+    target: str = typer.Argument(...),
+    local: bool = typer.Option(False, "--local"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    out: Optional[str] = typer.Option(None, "--out"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+    quietly: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+) -> None:
+    """Tech-debt report: TODO/FIXME/HACK markers clustered into themes."""
+    with _feature_ctx(target, local, refresh, no_llm) as ctx:
+        payload = techdebt.debt_payload(ctx.result, ctx.llm, ctx.config)
+        if quietly:
+            _print_json(payload)
+        else:
+            console.print(Panel(payload["summary"], title=f"Tech debt ({payload['count']} markers)"))
+            for theme in payload["themes"][:6]:
+                items = "\n".join(
+                    f"[cyan]{item['file']}[/cyan]:{item['line']} {_truncate(item['note'])}"
+                    for item in theme["items"][:6]
+                )
+                console.print(Panel(items or "[dim]no items[/dim]", title=theme["name"]))
+            for rec in payload["recommendations"][:3]:
+                console.print(f"[dim]→[/dim] {rec}")
+        if payload["themes"] or payload["count"]:
+            sections = [
+                section("Summary", esc(payload["summary"])),
+                *[
+                    section(
+                        theme["name"],
+                        esc(theme["description"])
+                        + html_table(
+                            ["file", "line", "note"],
+                            [[item["file"], item["line"], item.get("note", "")] for item in theme["items"]],
+                        ),
+                    )
+                    for theme in payload["themes"]
+                ],
+                section("Recommendations", "<ul>" + "".join(f"<li>{esc(rec)}</li>" for rec in payload["recommendations"]) + "</ul>"),
+            ]
+            _feature_out(ctx, f"Tech debt report — {ctx.result.full_name}", sections, payload, Path(out) if out else Path("reports"), "debt", quietly or False)
+
+
+@app.command("deps-review")
+def deps_review_cmd(
+    target: str = typer.Argument(...),
+    local: bool = typer.Option(False, "--local"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    out: Optional[str] = typer.Option(None, "--out"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+    quietly: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+) -> None:
+    """Dependency review: declared vs actually-imported packages."""
+    with _feature_ctx(target, local, refresh, no_llm) as ctx:
+        payload = deps_review.deps_payload(ctx.result, ctx.llm)
+        if quietly:
+            _print_json(payload)
+        else:
+            console.print(Panel(payload["summary"], title="Dependency review"))
+            if payload["unused_candidates"]:
+                table = Table(title="Unused candidates (verify manually)")
+                table.add_column("package")
+                table.add_column("note", overflow="fold")
+                for item in payload["unused_candidates"][:12]:
+                    table.add_row(item["name"], item.get("note", ""))
+                console.print(table)
+            if payload["risky"]:
+                for risk in payload["risky"][:6]:
+                    console.print(f"[bold]{risk['name']}[/bold]: {risk['why']}")
+            for tip in payload["advice"][:3]:
+                console.print(f"[dim]→[/dim] {tip}")
+        sections = [
+            section("Summary", esc(payload["summary"])),
+            section(
+                "Unused candidates",
+                html_table(
+                    ["package", "note"],
+                    [[item["name"], item.get("note", "")] for item in payload["unused_candidates"]],
+                ),
+            ),
+            section(
+                "Risks observed",
+                html_table(
+                    ["name", "why"],
+                    [[risk["name"], risk["why"]] for risk in payload["risky"]],
+                ),
+            ),
+        ]
+        _feature_out(ctx, f"Dependency review — {ctx.result.full_name}", sections, payload, Path(out) if out else Path("reports"), "deps-review", quietly or False)
+
+
+@app.command("refactor")
+def refactor_cmd(
+    target: str = typer.Argument(...),
+    local: bool = typer.Option(False, "--local"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    out: Optional[str] = typer.Option(None, "--out"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+    quietly: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+) -> None:
+    """Refactor plan from deterministic hotspots (god files, big symbols, fan-out, cycles)."""
+    with _feature_ctx(target, local, refresh, no_llm) as ctx:
+        payload = refactor.refactor_payload(ctx.result, ctx.llm)
+        if quietly:
+            _print_json(payload)
+        else:
+            console.print(Panel(payload["summary"], title="Refactor plan"))
+            for target_plan in payload["targets"][:8]:
+                steps = "\n".join(f"{idx + 1}. {step}" for idx, step in enumerate(target_plan["plan"]))
+                console.print(Panel(
+                    f"[bold]{target_plan['problem']}[/bold] ({target_plan['impact']} impact)\n{steps}",
+                    title=target_plan["name"],
+                    border_style="magenta",
+                ))
+            if payload["priorities"]:
+                console.print("[dim]priority order:[/dim] " + " → ".join(payload["priorities"]))
+        sections = [
+            section("Summary", esc(payload["summary"])),
+            *[
+                section(
+                    target_plan["name"],
+                    f"<p><b>{esc(target_plan['problem'])}</b> ({esc(target_plan['impact'])} impact)</p><ol class='flow'>"
+                    + "".join(f"<li>{esc(step)}</li>" for step in target_plan["plan"])
+                    + "</ol>",
+                )
+                for target_plan in payload["targets"]
+            ],
+        ]
+        _feature_out(ctx, f"Refactor plan — {ctx.result.full_name}", sections, payload, Path(out) if out else Path("reports"), "refactor", quietly or False)
+
+
+@app.command("security")
+def security_cmd(
+    target: str = typer.Argument(...),
+    local: bool = typer.Option(False, "--local"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    out: Optional[str] = typer.Option(None, "--out"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+    quietly: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+) -> None:
+    """Security-sweep report (deterministic scan, LLM-annotated)."""
+    with _feature_ctx(target, local, refresh, no_llm) as ctx:
+        payload = security.security_payload(ctx.result, ctx.llm)
+        if quietly:
+            _print_json(payload)
+            return
+        console.print(Panel(payload["summary"], title=f"Security sweep ({payload['count']} scans hits)"))
+        if payload["findings"]:
+            table = Table(title="Findings")
+            table.add_column("severity", justify="center")
+            table.add_column("file:line", overflow="fold")
+            table.add_column("finding", overflow="fold")
+            for finding in payload["findings"][:20]:
+                color = {"critical": "red", "high": "red", "medium": "yellow", "low": "dim"}.get(finding["severity"], "white")
+                table.add_row(
+                    f"[{color}]{finding['severity']}[/{color}]",
+                    f"{finding['file']}:{finding['line']}",
+                    (finding.get("fix") or finding["why"] or finding["title"])[:110],
+                )
+            console.print(table)
+        for note in payload["general_notes"][:4]:
+            console.print(f"[dim]• {note}[/dim]")
+        sections = [
+            section("Summary", esc(payload["summary"])),
+            section(
+                "Findings",
+                html_table(
+                    ["severity", "file", "line", "why", "fix"],
+                    [
+                        [finding["severity"], finding["file"], finding["line"], finding.get("why", ""), finding.get("fix", "")]
+                        for finding in payload["findings"]
+                    ],
+                ),
+            ),
+            section("General notes", "<ul>" + "".join(f"<li>{esc(note)}</li>" for note in payload["general_notes"]) + "</ul>"),
+        ]
+        _feature_out(ctx, f"Security sweep — {ctx.result.full_name}", sections, payload, Path(out) if out else Path("reports"), "security", quietly or False)
+
+
+@app.command("api")
+def api(
+    target: str = typer.Argument(...),
+    local: bool = typer.Option(False, "--local"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    out: Optional[str] = typer.Option(None, "--out"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+) -> None:
+    """Public-API reference: symbols grouped by module with descriptions."""
+    with _feature_ctx(target, local, refresh, no_llm) as ctx:
+        payload = api_reference.api_docs_payload(ctx.result, ctx.llm)
+        if not payload["inventory"]:
+            console.print("[yellow]no symbols parsed — nothing to document[/yellow]")
+            return
+        console.print(Panel(payload["summary"], title=f"Public API ({len(payload['inventory'])} modules)"))
+        for module in payload["modules"][:8]:
+            rows = "\n".join(
+                f"[cyan]{sym['name']}[/cyan] {_truncate(sym.get('signature', ''), 90)} — {sym['description']}"
+                for sym in module["symbols"][:10]
+            )
+            console.print(Panel(rows or "[dim]no symbols[/dim]", title=module["module"]))
+        if not payload["modules"]:
+            for entry in payload["inventory"][:6]:
+                rows = "\n".join(
+                    f"[cyan]{row['name']}[/cyan] ({row['kind']}) {_truncate(row['signature'], 90)}"
+                    for row in entry["symbols"][:12]
+                )
+                console.print(Panel(rows or "[dim]no public symbols[/dim]", title=entry["module"]))
+        if payload["modules"]:
+            detail_sections = [
+                section(
+                    module["module"],
+                    f"<p>{esc(module['role'])}</p>"
+                    + html_table(
+                        ["symbol", "signature", "description"],
+                        [[f"<b>{esc(sym['name'])}</b>", esc(sym.get("signature", "")), esc(sym["description"])] for sym in module["symbols"]],
+                    ),
+                )
+                for module in payload["modules"]
+            ]
+        else:
+            detail_sections = [
+                section(
+                    entry["module"],
+                    html_table(
+                        ["kind", "symbol", "signature"],
+                        [[row["kind"], f"<b>{esc(row['name'])}</b>", esc(row["signature"])] for row in entry["symbols"]],
+                    ),
+                )
+                for entry in payload["inventory"]
+            ]
+        sections = [section("Summary", esc(payload["summary"])), *detail_sections]
+        _feature_out(ctx, f"Public API — {ctx.result.full_name}", sections, payload, Path(out) if out else Path("reports"), "api", False)
+
+
+@app.command("review")
+def review(
+    target: str = typer.Argument(..., help="GitHub repo (URL or owner/repo)"),
+    base: str = typer.Argument(..., help="Base ref (branch/tag/SHA)"),
+    head: Optional[str] = typer.Option(None, "--head", help="Head ref (default: repo default branch)"),
+    out: Optional[str] = typer.Option(None, "--out"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+    quietly: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+) -> None:
+    """Code review of a commit range via the GitHub compare API."""
+    slug = parse_target(target)
+    if slug is None:
+        console.print("[red]error:[/red] review needs a GitHub repo target")
+        raise typer.Exit(code=1)
+    with _feature_ctx(target, False, False, no_llm, None) as ctx:
+        from repo_analyzer.github.client import GitHubClient
+
+        head_ref = head or ctx.result.ref or "HEAD"
+        try:
+            client = GitHubClient(ctx.config.github)
+            diff = review_diff.fetch_diff(client, slug, base, head_ref)
+        except AnalyzerError as exc:
+            console.print(f"[red]error:[/red] compare failed: {exc}")
+            raise typer.Exit(code=1) from exc
+        payload = review_diff.review_payload(diff, ctx.llm)
+        if quietly:
+            _print_json(payload)
+            return
+        console.print(Panel(payload["summary"], title=f"Review {base}…{head_ref}"))
+        if payload["commits"]:
+            console.print("[dim]commits:[/dim] " + ", ".join(commit["message"][:40] for commit in payload["commits"][:8]))
+        if payload["findings"]:
+            table = Table(title="Findings")
+            table.add_column("severity", justify="center")
+            table.add_column("file:line", overflow="fold")
+            table.add_column("comment", overflow="fold")
+            for finding in payload["findings"][:16]:
+                color = {"critical": "red", "high": "red", "medium": "yellow", "low": "dim"}.get(finding["severity"], "white")
+                table.add_row(
+                    f"[{color}]{finding['severity']}[/{color}]",
+                    f"{finding['file']}:{finding['line'] or '-'}",
+                    finding["comment"][:130],
+                )
+            console.print(table)
+        for tip in payload["improvements"][:3]:
+            console.print(f"[dim]→[/dim] {tip}")
+        changed = payload.get("changed_files") or []
+        sections = [
+            section("Summary", esc(payload["summary"])),
+            section("Commits", "<ul>" + "".join(f"<li>{esc(commit['message'])}</li>" for commit in payload["commits"]) + "</ul>"),
+            section(
+                "Findings",
+                html_table(
+                    ["severity", "file", "line", "comment"],
+                    [[f["severity"], f["file"], f["line"] or "", f["comment"]] for f in payload["findings"]],
+                ),
+            ),
+            section(
+                "Changed files",
+                "<ul>" + "".join(f"<li>{esc(name)}</li>" for name in changed[:80]) + "</ul>",
+            ),
+        ]
+        _feature_out(
+            ctx,
+            f"Code review {base}…{head_ref} — {ctx.result.full_name}",
+            sections,
+            {**payload, "changed_files": changed},
+            Path(out) if out else Path("reports"),
+            f"review-{base}-to-{head_ref}".replace("/", "_").replace("...", "-"),
+            quietly or False,
+        )
+
+
+def _truncate(text: str, limit: int = 100) -> str:
+    """Console-safe truncation."""
+    text = esc(str(text))
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 @app.command()

@@ -30,6 +30,8 @@ Python_Capstone_Project/
 │   ├── analyzer.py         ★  RepoAnalyzer orchestrator; AnalyzedRepository dataclass
 │   │                          analyze(target, is_local, refresh) -> AnalyzedRepository
 │   ├── cli.py               ★  typer CLI: analyze / architecture / docs / ask / bug
+│   │                          + chat / debt / deps-review / refactor / security /
+│   │                          api / review, and version / clean / config utilities
 │   ├── config.py               AppConfig (pydantic); env: REPO_ANALYZER_CONFIG,
 │   │                           REPO_ANALYZER_PROVIDER, REPO_ANALYZER_CACHE
 │   │                           Providers get injected by default (gemini/openrouter)
@@ -69,17 +71,36 @@ Python_Capstone_Project/
 │   │   ├── service.py          LLMService.generate(): per-provider validation retry,
 │   │   │                       transport-error provider fallback; agenerate()
 │   │   └── schemas.py          OverviewOut, ArchitectureOut, DocsOut, QAOut,
-│   │                           BugInvestigationOut, Citation (extra=forbid)
+│   │                           BugInvestigationOut, Citation, DiagramNotesOut,
+│   │                           DebtOut, DepReviewOut, RefactorPlanOut,
+│   │                           SecurityOut, ApiDocsOut, ReviewOut (extra=forbid)
 │   ├── features/
 │   │   ├── context.py          relevance scoring, ranked_paths, build_pack (char budget),
 │   │   │                       sanitize_for_prompt (secret redaction)
 │   │   ├── overview.py         deterministic_overview(), llm_overview()
-│   │   ├── architecture_feature.py  architecture_payload(), llm_architecture()
+│   │   ├── architecture_feature.py  architecture_payload(), llm_architecture(),
+│   │   │                            llm_diagram_notes() (per-chart narratives)
 │   │   ├── documentation.py    documentation_payload(), llm_documentation()
 │   │   ├── qa.py               retrieve_chunks (BM25-lite over symbol-aligned chunks),
 │   │   │                       ask() -> Answer (LLM-grounded or deterministic fallback)
-│   │   └── contributor.py      investigate() suspects/trace/tests, trace_impact(),
-│   │                           find_test_files()
+│   │   ├── contributor.py      investigate() suspects/trace/tests, trace_impact(),
+│   │   │                       find_test_files()
+│   │   ├── chat.py             run_chat(): interactive multi-turn Q&A loop
+│   │   ├── techdebt.py         extract_markers() TODO/FIXME/HACK scan (binary/lock
+│   │   │                       files skipped), debt_payload() → themed report
+│   │   ├── security.py         scan(): 15 dangerous-pattern regexes (eval, pickle,
+│   │   │                       yaml.load, shell=True, CORS, innerHTML…), _redact(),
+│   │   │                       security_payload() (deterministic + LLM notes)
+│   │   ├── deps_review.py      collect_usage(): manifest-declared vs imported
+│   │   │                       (stdlib-aware, import-alias normalization),
+│   │   │                       deps_payload() with optional LLM risk analysis
+│   │   ├── refactor.py         hotspots(): god files (≥300 LOC, lock/vendor
+│   │   │                       excluded), god symbols (≥80 lines), classes ≥12
+│   │   │                       methods, fan-out ≥10; refactor_payload() → plan
+│   │   ├── api_reference.py    api_inventory() (top modules × public symbols),
+│   │   │                       api_docs_payload() with per-symbol LLM descriptions
+│   │   └── review_diff.py      review_payload(diff, llm); fetch_diff() via
+│   │                           GitHubClient.compare() (base…head, patch-capped)
 │   └── report/
 │       ├── render.py           markdown helpers (tables, mermaid blocks)
 │       ├── html.py             self-contained HTML report w/ mermaid CDN
@@ -136,10 +157,12 @@ with validated schemas) → report/html write.
 | SQLite cache (blob-hash reuse, analysis cache) | ✅ tests |
 | LLM service: same-provider payload retry, transport fallback, schema feedback retry | ✅ verified + tests |
 | Features (overview/arch/docs/qa/contributor) deterministic paths | ✅ verified + tests |
-| CLI all 5 commands on sample fixture | ✅ verified + tests |
+| CLI all commands on sample fixture | ✅ verified + tests |
 | GitHub e2e through full pipeline (mocked transport) | ✅ tests |
 | **Live GitHub e2e**: octocat/Hello-World + pallets/flask (225 files, 19k LOC), reports written | ✅ ran manually |
 | **Live QA/bug at flask scale** | ✅ ran manually (correct file hits) |
+| **Live Qwen/Groq e2e**: full analyze + diagram notes (Saplings, 2m) | ✅ ran manually |
+| **Live feature commands**: debt/security/deps-review/refactor/api on Saplings, chat multi-turn, review vs octocat/Hello-World compare | ✅ ran manually |
 
 ## 5. Testing instructions (run in a fresh session)
 
