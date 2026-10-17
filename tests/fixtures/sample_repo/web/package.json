@@ -1,0 +1,8 @@
+{
+  "name": "sample-web",
+  "version": "0.1.0",
+  "main": "frontend.js",
+  "scripts": {
+    "start": "node frontend.js"
+  }
+}

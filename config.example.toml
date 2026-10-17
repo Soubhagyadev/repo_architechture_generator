@@ -1,0 +1,45 @@
+# repo-analyzer configuration
+# Copy to repo_analyzer.toml (or point REPO_ANALYZER_CONFIG at it) and edit.
+
+default_provider = "gemini"
+
+[provider_defaults]
+# Per-request generation knobs.
+temperature = 0.2
+max_output_tokens = 4096
+max_retries = 5
+timeout_seconds = 90.0
+
+[[providers]]
+name = "gemini"
+kind = "gemini"
+model = "gemini-2.5-flash"
+env_key = "GEMINI_API_KEY"
+
+[[providers]]
+name = "openrouter"
+kind = "openrouter"
+model = "openai/gpt-4o-mini"
+env_key = "OPENROUTER_API_KEY"
+# base_url = "https://openrouter.ai/api/v1"   # optional override
+
+[[providers]]
+name = "groq"
+kind = "openrouter"                          # groq speaks the OpenAI-compatible protocol
+model = "qwen/qwen3.8-27b"
+env_key = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
+
+[limits]
+# Safety caps for workspace scanning and LLM context packing.
+max_file_bytes = 1000000
+pack_char_budget = 26000
+max_files_per_pack = 120
+
+[github]
+api_base = "https://api.github.com"
+token_env = "GITHUB_TOKEN"
+
+[cache]
+# Where extracted workspaces and the SQLite cache live.
+root = "repo_analyzer_cache"

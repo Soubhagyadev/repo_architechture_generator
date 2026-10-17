@@ -1,0 +1,19 @@
+# --- runtime caches / state ---
+repo_analyzer_cache/
+reports/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# --- secrets ---
+.env
+.env.local
+
+# --- packaging / tooling ---
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.coverage
+htmlcov/
